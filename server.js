@@ -197,4 +197,8 @@ app.ws('/customer-stream', (ws, req) => {
     ws.on('error', (err) => { console.error("-> ⚠️ Customer WS Error:", err); });
 });
 
-app.listen(process.env.PORT, () => console.log(`Server started on port ${process.env.PORT}`));
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server started on port ${PORT}`);
+});
