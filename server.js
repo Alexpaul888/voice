@@ -10,30 +10,12 @@ const { WaveFile } = require('wavefile');
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Sockets (Calls) ke reference variables
 let agentWs = null;
 let customerWs = null;
 let agentStreamSid = null;
 let customerStreamSid = null;
 
-// Voice Activity Detection (VAD) Settings
-const SILENCE_THRESHOLD = 400; 
-const MAX_SILENCE_FRAMES = 25; 
-let isSpeaking = false;
-let silenceFrames = 0;
-let agentVoiceBuffer = [];
-
-// Mu-Law aawaz ko PCM mein badalne ka formula
-const muLawToPcm = new Int16Array(256);
-for (let i = 0; i < 256; i++) {
-    let mu = ~i;
-    let sign = (mu & 0x80) ? -1 : 1;
-    let exponent = (mu >> 4) & 0x07;
-    let mantissa = mu & 0x0F;
-    muLawToPcm[i] = sign * (((mantissa << 3) + 0x84) << exponent) - 0x84;
-}
-
-// Helper to construct WSS URL from BASE_URL
+// Helper function to build Vobiz WebSocket URL
 function getWsUrl(endpoint) {
     const baseUrl = process.env.BASE_URL || 'https://localhost:3000';
     return baseUrl.replace(/^http/, 'ws') + endpoint;
@@ -44,7 +26,6 @@ function getWsUrl(endpoint) {
 // ----------------------------------------------------
 async function convertVoice(audioBufferArray) {
     if (!customerWs || customerWs.readyState !== 1) {
-        console.log("Customer abhi line par nahi hai, aawaz nahi bheji.");
         return;
     }
     
@@ -71,9 +52,13 @@ async function convertVoice(audioBufferArray) {
         response.data.on('data', (chunk) => {
             if (customerWs && customerWs.readyState === 1 && customerStreamSid) {
                 customerWs.send(JSON.stringify({
-                    event: "media",
-                    streamSid: customerStreamSid,
-                    media: { payload: chunk.toString('base64') }
+                    event: "playAudio",
+                    streamId: customerStreamSid,
+                    media: { 
+                        contentType: "audio/x-mulaw",
+                        sampleRate: 8000,
+                        payload: chunk.toString('base64') 
+                    }
                 }));
             }
         });
@@ -86,10 +71,10 @@ async function convertVoice(audioBufferArray) {
 }
 
 // ----------------------------------------------------
-// VOBIZ WEBHOOKS
+// VOBIZ WEBHOOKS (Official Vobiz XML Format)
 // ----------------------------------------------------
 app.post('/vobiz-inbound-agent', (req, res) => {
-    console.log(`\n-> 📞 Agent Webhook Hit! Event: ${req.body.Event || 'Start'} | Status: ${req.body.CallStatus}`);
+    console.log(`\n-> 📞 Agent Webhook Hit! Event: ${req.body.Event || 'Start'}`);
     res.type('text/xml');
 
     if (req.body.Event === 'Hangup' || req.body.CallStatus === 'completed' || req.body.CallStatus === 'hangup') {
@@ -99,16 +84,14 @@ app.post('/vobiz-inbound-agent', (req, res) => {
     const wsUrl = getWsUrl('/agent-stream');
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Connect>
-        <Stream url="${wsUrl}" />
-    </Connect>
+    <Stream bidirectional="true">${wsUrl}</Stream>
 </Response>`;
 
     res.send(twiml);
 });
 
 app.post('/vobiz-inbound-customer', (req, res) => {
-    console.log(`\n-> 📞 Customer Webhook Hit! Event: ${req.body.Event || 'Start'} | Status: ${req.body.CallStatus}`);
+    console.log(`\n-> 📞 Customer Webhook Hit! Event: ${req.body.Event || 'Start'}`);
     res.type('text/xml');
     
     if (req.body.Event === 'Hangup' || req.body.CallStatus === 'completed' || req.body.CallStatus === 'hangup') {
@@ -119,16 +102,14 @@ app.post('/vobiz-inbound-customer', (req, res) => {
     const wsUrl = getWsUrl('/customer-stream');
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Connect>
-        <Stream url="${wsUrl}" />
-    </Connect>
+    <Stream bidirectional="true">${wsUrl}</Stream>
 </Response>`;
     
-    console.log("-> Vobiz ko bhej rahe hain XML:\n", twiml);
+    console.log("-> Vobiz ko bhej rahe hain Official XML:\n", twiml);
     res.send(twiml);
 });
 
-// Outbound Call Lagane ka API
+// Outbound Call API
 app.post('/make-call', async (req, res) => {
     const { to } = req.body;
     try {
@@ -154,13 +135,13 @@ app.post('/make-call', async (req, res) => {
         res.json({ success: true, response: response.data });
     } catch (err) {
         console.log("!!! VOBIZ API NE CALL REJECT KAR DI !!!");
-        console.error("Asli Kaaran (Reason):", err.response ? JSON.stringify(err.response.data, null, 2) : err.message);
+        console.error("Reason:", err.response ? JSON.stringify(err.response.data, null, 2) : err.message);
         res.status(500).json({ error: "Call lagane mein dikkat aayi" });
     }
 });
 
 // ----------------------------------------------------
-// WEBSOCKETS
+// WEBSOCKETS (Vobiz Stream Event Format)
 // ----------------------------------------------------
 app.ws('/agent-stream', (ws) => {
     agentWs = ws;
@@ -170,41 +151,31 @@ app.ws('/agent-stream', (ws) => {
         try {
             const data = JSON.parse(msg);
             if (data.event === "start") {
-                agentStreamSid = data.streamSid;
-                console.log("-> Agent Stream Start SID:", agentStreamSid);
+                agentStreamSid = data.start?.streamId || data.streamSid;
+                console.log("-> Agent Stream Start ID:", agentStreamSid);
             }
         } catch (e) { console.error("Agent WS Error:", e); }
     });
 
-    ws.on('close', () => { agentWs = null; console.log("-> ❌ Agent WebSocket Disconnect hua."); });
+    ws.on('close', () => { agentWs = null; console.log("-> ❌ Agent WebSocket Disconnect."); });
     ws.on('error', (err) => { console.error("-> ⚠️ Agent WS Error:", err); });
 });
 
 app.ws('/customer-stream', (ws, req) => {
     console.log("-> 🔥🔥🔥 BINGO! Customer WebSocket Connection Request Aagayi! 🔥🔥🔥");
     customerWs = ws;
-    console.log("-> 🟢 Customer WebSocket Connect ho gaya!");
 
     ws.on('message', (msg) => {
         try {
             const data = JSON.parse(msg);
             if (data.event === "start") {
-                customerStreamSid = data.streamSid;
-                console.log("-> Customer Stream Start SID:", customerStreamSid);
-            }
-            if (data.event === "media") {
-                if (agentWs && agentWs.readyState === 1 && agentStreamSid) {
-                    agentWs.send(JSON.stringify({
-                        event: "media",
-                        streamSid: agentStreamSid,
-                        media: { payload: data.media.payload }
-                    }));
-                }
+                customerStreamSid = data.start?.streamId || data.streamSid;
+                console.log("-> Customer Stream Start ID:", customerStreamSid);
             }
         } catch (e) { console.error("Customer WS Error:", e); }
     });
 
-    ws.on('close', () => { customerWs = null; console.log("-> ❌ Customer WebSocket Disconnect ho gaya."); });
+    ws.on('close', () => { customerWs = null; console.log("-> ❌ Customer WebSocket Disconnect."); });
     ws.on('error', (err) => { console.error("-> ⚠️ Customer WS Error:", err); });
 });
 
