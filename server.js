@@ -33,6 +33,12 @@ for (let i = 0; i < 256; i++) {
     muLawToPcm[i] = sign * (((mantissa << 3) + 0x84) << exponent) - 0x84;
 }
 
+// Helper to construct WSS URL from BASE_URL
+function getWsUrl(endpoint) {
+    const baseUrl = process.env.BASE_URL || 'https://localhost:3000';
+    return baseUrl.replace(/^http/, 'ws') + endpoint;
+}
+
 // ----------------------------------------------------
 // ElevenLabs API (Voice Changer)
 // ----------------------------------------------------
@@ -84,36 +90,41 @@ async function convertVoice(audioBufferArray) {
 // ----------------------------------------------------
 app.post('/vobiz-inbound-agent', (req, res) => {
     console.log(`\n-> 📞 Agent Webhook Hit! Event: ${req.body.Event || 'Start'} | Status: ${req.body.CallStatus}`);
-    res.set('Content-Type', 'text/xml');
+    res.type('text/xml');
 
     if (req.body.Event === 'Hangup' || req.body.CallStatus === 'completed' || req.body.CallStatus === 'hangup') {
-        return res.send('<Response/>');
+        return res.send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
 
-    const wsUrl = process.env.BASE_URL.replace(/^http/, 'ws') + '/agent-stream';
-    // Fix: Connect hata diya aur 300 seconds (5 min) ka Pause laga diya taaki call na kate
-    const twiml = `<Response><Stream url="${wsUrl}" /><Pause length="300"/></Response>`;
+    const wsUrl = getWsUrl('/agent-stream');
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="${wsUrl}" />
+    </Connect>
+</Response>`;
+
     res.send(twiml);
 });
 
 app.post('/vobiz-inbound-customer', (req, res) => {
     console.log(`\n-> 📞 Customer Webhook Hit! Event: ${req.body.Event || 'Start'} | Status: ${req.body.CallStatus}`);
-    
-    // Ngrok Warning Bypass & Standard Headers
-    res.set({
-        'Content-Type': 'text/xml',
-        'ngrok-skip-browser-warning': 'true'
-    });
+    res.type('text/xml');
     
     if (req.body.Event === 'Hangup' || req.body.CallStatus === 'completed' || req.body.CallStatus === 'hangup') {
         console.log("-> Call Hangup event handled.");
-        return res.send('<Response/>');
+        return res.send('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
 
-    const wsUrl = process.env.BASE_URL.replace(/^http/, 'ws') + '/customer-stream';
-    const twiml = `<Response><Stream url="${wsUrl}" /><Pause length="300"/></Response>`;
+    const wsUrl = getWsUrl('/customer-stream');
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="${wsUrl}" />
+    </Connect>
+</Response>`;
     
-    console.log("-> Vobiz ko bhej rahe hain XML:", twiml);
+    console.log("-> Vobiz ko bhej rahe hain XML:\n", twiml);
     res.send(twiml);
 });
 
